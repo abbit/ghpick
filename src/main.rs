@@ -1,17 +1,20 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Parser;
-use tokio::time::{interval, Duration};
+use indicatif::{ProgressBar, ProgressStyle};
+use tokio::{
+    select,
+    time::{interval, Duration},
+};
 
 const BASE_URL: &str = "https://raw.githubusercontent.com";
-const DEFAULT_BRANCH: &str = "main";
 
 #[derive(Parser)]
 /// Fetch a file from a GitHub repo
 struct Cli {
     /// Branch to fetch from
-    #[clap(short, long, default_value = DEFAULT_BRANCH)]
+    #[clap(short, long, default_value = "main")]
     branch: String,
 
     /// Destination path to save file
@@ -19,6 +22,8 @@ struct Cli {
     dest: PathBuf,
 
     /// Path to file in repo
+    /// in format "owner/repo/path/to/file"
+    /// (example: abbit/ghpick/src/main.rs)
     path: String,
 }
 
@@ -28,16 +33,9 @@ struct PathParts<'a> {
 }
 
 fn parse_path<'a>(path: &'a str, branch: &'a str) -> Result<PathParts<'a>> {
-    let (owner, rest_path) = path
-        .split_once('/')
-        .ok_or(anyhow::anyhow!("invalid path"))?;
-    let (repo, rest_path) = rest_path
-        .split_once('/')
-        .ok_or(anyhow::anyhow!("invalid path"))?;
-    let filename = rest_path
-        .split('/')
-        .last()
-        .ok_or(anyhow::anyhow!("invalid path"))?;
+    let (owner, rest_path) = path.split_once('/').ok_or(anyhow!("invalid path"))?;
+    let (repo, rest_path) = rest_path.split_once('/').ok_or(anyhow!("invalid path"))?;
+    let filename = rest_path.split('/').last().ok_or(anyhow!("invalid path"))?;
     let full_path = format!("{}/{}/{}/{}", owner, repo, branch, rest_path).leak();
 
     Ok(PathParts {
@@ -55,7 +53,7 @@ async fn fetch_file<'a>(path_parts: &PathParts<'a>) -> Result<String> {
             &path_parts.full,
             res.text().await?
         );
-        return Err(anyhow::anyhow!(err_msg));
+        return Err(anyhow!(err_msg));
     }
     let body = res.text().await?;
     Ok(body)
@@ -67,10 +65,10 @@ async fn save_file<'a>(destpath: &Path, path_parts: &PathParts<'a>, file: &str) 
     Ok(())
 }
 
-fn create_spinner() -> indicatif::ProgressBar {
-    let spinner = indicatif::ProgressBar::new_spinner();
+fn create_spinner() -> ProgressBar {
+    let spinner = ProgressBar::new_spinner();
     spinner.set_style(
-        indicatif::ProgressStyle::default_spinner()
+        ProgressStyle::default_spinner()
             .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
             .template("{spinner:.green} {msg}")
             .unwrap(),
@@ -79,7 +77,7 @@ fn create_spinner() -> indicatif::ProgressBar {
     spinner
 }
 
-async fn start_spinner(spinner: &indicatif::ProgressBar, msg: String) {
+async fn start_spinner(spinner: &ProgressBar, msg: String) {
     let mut intv = interval(Duration::from_millis(120));
     spinner.set_message(msg);
     loop {
@@ -103,22 +101,19 @@ async fn main() -> Result<()> {
         Ok::<(), anyhow::Error>(())
     };
 
-    tokio::select! {
+    select! {
         _ = spin_handle => {},
         download_res = file_downloading => {
             spinner.finish_and_clear();
-            match download_res {
-                Ok(_) => {
-                    spinner.println(format!("{} saved to {}", path_parts.full, args.dest.join(path_parts.filename).display()));
-                },
-                Err(e) => {
-                    return Err(e);
-                }
-            }
+            download_res?;
         }
     }
 
-    println!("Done!");
+    println!(
+        "{} saved to {}\nDone!",
+        path_parts.full,
+        args.dest.join(path_parts.filename).display()
+    );
 
     Ok(())
 }
